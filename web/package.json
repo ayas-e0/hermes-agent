@@ -4,16 +4,13 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "sync-assets": "node scripts/sync-assets.mjs",
-    "predev": "npm run sync-assets",
-    "prebuild": "npm run sync-assets",
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview"
   },
   "dependencies": {
-    "@nous-research/ui": "^0.10.0",
+    "@nous-research/ui": "0.14.0",
     "@observablehq/plot": "^0.6.17",
     "@react-three/fiber": "^9.6.0",
     "@tailwindcss/vite": "^4.2.1",
