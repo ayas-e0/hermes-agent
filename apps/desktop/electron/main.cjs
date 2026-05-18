@@ -479,6 +479,70 @@ function broadcastBootProgress() {
   webContents.send('hermes:boot-progress', bootProgressState)
 }
 
+// Bootstrap-event broadcast channel + state. The bootstrap runner emits a
+// stream of events (manifest, stage, log, complete, failed) that the renderer
+// install overlay subscribes to. We also keep a running snapshot:
+//   - manifest: the stage list (rendered as a checklist in the overlay)
+//   - stages:   per-stage state ('pending' | 'running' | 'succeeded' |
+//               'skipped' | 'failed') keyed by stage name
+//   - active:   true while a bootstrap is in flight; false otherwise
+//   - error:    last 'failed' event's error message
+//   - log:      bounded ring buffer of the last 200 log lines for the
+//               "Show details" affordance in the overlay
+//
+// The snapshot is queryable via the hermes:bootstrap:get IPC handler so a
+// reloaded renderer (e.g. devtools reload during dev) recovers state.
+const BOOTSTRAP_LOG_RING_MAX = 200
+let bootstrapState = {
+  active: false,
+  manifest: null,
+  stages: {},
+  error: null,
+  log: [],
+  startedAt: null,
+  completedAt: null
+}
+
+function broadcastBootstrapEvent(ev) {
+  if (ev.type === 'manifest') {
+    bootstrapState.manifest = ev
+    bootstrapState.active = true
+    bootstrapState.startedAt = bootstrapState.startedAt || Date.now()
+    bootstrapState.stages = {}
+    for (const stage of ev.stages || []) {
+      bootstrapState.stages[stage.name] = { state: 'pending', json: null, durationMs: null, error: null }
+    }
+  } else if (ev.type === 'stage') {
+    bootstrapState.stages[ev.name] = {
+      state: ev.state,
+      durationMs: ev.durationMs ?? null,
+      json: ev.json ?? null,
+      error: ev.error ?? null
+    }
+  } else if (ev.type === 'log') {
+    bootstrapState.log.push({ ts: Date.now(), stage: ev.stage || null, line: ev.line })
+    if (bootstrapState.log.length > BOOTSTRAP_LOG_RING_MAX) {
+      bootstrapState.log.splice(0, bootstrapState.log.length - BOOTSTRAP_LOG_RING_MAX)
+    }
+  } else if (ev.type === 'complete') {
+    bootstrapState.active = false
+    bootstrapState.completedAt = Date.now()
+    bootstrapState.error = null
+  } else if (ev.type === 'failed') {
+    bootstrapState.active = false
+    bootstrapState.error = ev.error || 'unknown error'
+  }
+
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  const { webContents } = mainWindow
+  if (!webContents || webContents.isDestroyed()) return
+  webContents.send('hermes:bootstrap:event', ev)
+}
+
+function getBootstrapState() {
+  return bootstrapState
+}
+
 function updateBootProgress(update, options = {}) {
   const nextProgressRaw =
     typeof update.progress === 'number' ? clampBootProgress(update.progress) : bootProgressState.progress
@@ -1290,9 +1354,15 @@ async function ensureRuntime(backend) {
       hermesHome: HERMES_HOME,
       logRoot: path.join(HERMES_HOME, 'logs'),
       onEvent: ev => {
-        // For now just tee to desktop.log. Phase 1E adds IPC to renderer.
+        // Tee every bootstrap event to (a) the desktop log for forensics
+        // and (b) the renderer for live progress UI. Either may be absent;
+        // tolerate both gracefully so a renderer crash doesn't stall the
+        // bootstrap and a log-write failure doesn't suppress the UI signal.
         try {
           rememberLog(`[bootstrap] ${JSON.stringify(ev)}`)
+        } catch {}
+        try {
+          broadcastBootstrapEvent(ev)
         } catch {}
       },
       writeMarker: writeBootstrapMarker
@@ -2682,6 +2752,7 @@ function createWindow() {
 
 ipcMain.handle('hermes:connection', async () => startHermes())
 ipcMain.handle('hermes:boot-progress:get', async () => bootProgressState)
+ipcMain.handle('hermes:bootstrap:get', async () => getBootstrapState())
 ipcMain.handle('hermes:connection-config:get', async () => sanitizeDesktopConnectionConfig())
 ipcMain.handle('hermes:connection-config:test', async (_event, payload) => testDesktopConnectionConfig(payload))
 ipcMain.handle('hermes:connection-config:save', async (_event, payload) => {
